@@ -101,14 +101,15 @@ function App() {
   const [nativeFormat, setNativeFormat] = useState(nativeFormats[0].value);
   const [stagedFiles, setStagedFiles] = useState([]);
   const [creoPdfFiles, setCreoPdfFiles] = useState([]);
-  const [outputFiles, setOutputFiles] = useState(() => loadStorage('creo-output-files-v1', []));
   const [selectedPdfLabel, setSelectedPdfLabel] = useState('');
   const [selectedCreoPdfLabel, setSelectedCreoPdfLabel] = useState('');
-  const [generated, setGenerated] = useState(false);
   const [generatedAt, setGeneratedAt] = useState('');
-  const [versionMap, setVersionMap] = useState(() => loadStorage('creo-version-map-v1', {}));
+  const [reportUrl, setReportUrl] = useState('');
+  const [reportStatus, setReportStatus] = useState('Waiting for PDF files');
+  const [reportError, setReportError] = useState('');
   const [formatMenuOpen, setFormatMenuOpen] = useState(false);
   const [alertMessage, setAlertMessage] = useState('');
+  const [alertTitle, setAlertTitle] = useState('PDF files only');
   const [alertOpen, setAlertOpen] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const fileInputRef = useRef(null);
@@ -119,20 +120,12 @@ function App() {
     nativeFormats.find((item) => item.value === nativeFormat)?.label ?? nativeFormat;
 
   const summary = useMemo(() => {
-    const totalSize = outputFiles.reduce((acc, file) => acc + file.size, 0);
     return {
-      count: outputFiles.length,
-      size: formatBytes(totalSize),
+      referenceCount: stagedFiles.length,
+      creoCount: creoPdfFiles.length,
+      size: formatBytes([...stagedFiles, ...creoPdfFiles].reduce((acc, file) => acc + file.size, 0)),
     };
-  }, [outputFiles]);
-
-  useEffect(() => {
-    window.localStorage.setItem('creo-output-files-v1', JSON.stringify(outputFiles));
-  }, [outputFiles]);
-
-  useEffect(() => {
-    window.localStorage.setItem('creo-version-map-v1', JSON.stringify(versionMap));
-  }, [versionMap]);
+  }, [stagedFiles, creoPdfFiles]);
 
   useEffect(() => {
     const handlePointerDown = (event) => {
@@ -145,14 +138,16 @@ function App() {
     return () => window.removeEventListener('pointerdown', handlePointerDown);
   }, []);
 
-  const openAlert = (message) => {
+  const openAlert = (message, title = 'PDF files only') => {
     setAlertMessage(message);
+    setAlertTitle(title);
     setAlertOpen(true);
   };
 
   const closeAlert = () => {
     setAlertOpen(false);
     setAlertMessage('');
+    setAlertTitle('PDF files only');
   };
 
   const handleCreoFolder = (event) => {
@@ -167,8 +162,10 @@ function App() {
     if (invalidFile) {
       setSelectedPdfLabel('');
       setStagedFiles([]);
-      setGenerated(false);
       setGeneratedAt('');
+      setReportUrl('');
+      setReportError('');
+      setReportStatus('Waiting for PDF files');
       openAlert('Only PDF files are allowed. Please select PDF files only.');
       event.target.value = '';
       return;
@@ -188,8 +185,10 @@ function App() {
 
     setSelectedPdfLabel(fileLabel);
     setStagedFiles(enriched);
-    setGenerated(false);
     setGeneratedAt('');
+    setReportUrl('');
+    setReportError('');
+    setReportStatus('PDF files selected, ready to generate');
     event.target.value = '';
   };
 
@@ -205,8 +204,10 @@ function App() {
     if (invalidFile) {
       setSelectedCreoPdfLabel('');
       setCreoPdfFiles([]);
-      setGenerated(false);
       setGeneratedAt('');
+      setReportUrl('');
+      setReportError('');
+      setReportStatus('Waiting for PDF files');
       openAlert('Only PDF files are allowed. Please select PDF files only.');
       event.target.value = '';
       return;
@@ -226,8 +227,10 @@ function App() {
 
     setSelectedCreoPdfLabel(fileLabel);
     setCreoPdfFiles(enriched);
-    setGenerated(false);
     setGeneratedAt('');
+    setReportUrl('');
+    setReportError('');
+    setReportStatus('PDF files selected, ready to generate');
     event.target.value = '';
   };
 
@@ -239,98 +242,68 @@ function App() {
     creoPdfInputRef.current?.click();
   };
 
-  const markDownloadTimestamp = (fileId) => {
-    const stamp = formatTimestamp(new Date());
-    setOutputFiles((current) =>
-      current.map((item) => (item.id === fileId ? { ...item, downloadedAt: stamp } : item)),
-    );
-    return stamp;
-  };
-
-  const deleteOutputFile = (fileId) => {
-    setOutputFiles((current) => current.filter((item) => item.id !== fileId));
-  };
-
-  const downloadFile = (fileEntry) => {
-    const href = fileEntry.dataUrl || URL.createObjectURL(fileEntry.file);
-    const anchor = document.createElement('a');
-    anchor.href = href;
-    anchor.download = fileEntry.generatedName || fileEntry.name;
-    document.body.appendChild(anchor);
-    anchor.click();
-    anchor.remove();
-    if (!fileEntry.dataUrl) {
-      URL.revokeObjectURL(href);
+  const openReport = () => {
+    if (reportUrl) {
+      window.open(reportUrl, '_blank', 'noopener,noreferrer');
     }
-    markDownloadTimestamp(fileEntry.id);
-  };
-
-  const downloadAllFiles = () => {
-    outputFiles.forEach((fileEntry, index) => {
-      window.setTimeout(() => downloadFile(fileEntry), index * 250);
-    });
   };
 
   const generateOutput = async () => {
-    const combinedFiles = [...stagedFiles, ...creoPdfFiles];
-    if (!combinedFiles.length || isGenerating) return;
+    if (!stagedFiles.length || !creoPdfFiles.length || isGenerating) {
+      openAlert('Please select PDF files for both panels before generating the report.');
+      return;
+    }
 
     setIsGenerating(true);
+    setReportError('');
+    setReportStatus('Sending files to the analyzer...');
     try {
-      const generationStamp = formatDownloadStamp(new Date());
-      const nextVersionMap = { ...versionMap };
-
-      const versionedFiles = await Promise.all(
-        combinedFiles.map(async (file) => {
-          const fileKey = normalizePdfBaseName(file.name).toLowerCase();
-
-          // Check version embedded in the uploaded filename (handles re-uploaded downloads)
-          const embeddedVersion = extractVersionFromName(file.name);
-
-          // Check versions already tracked in outputFiles and versionMap
-          const existingVersions = outputFiles
-            .filter((item) => normalizePdfBaseName(item.name).toLowerCase() === fileKey)
-            .map((item) => item.version || 1);
-
-          const nextVersion =
-            Math.max(
-              0,
-              embeddedVersion,           // version from the uploaded file's own name
-              nextVersionMap[fileKey] || 0,
-              ...existingVersions,
-            ) + 1;
-
-          nextVersionMap[fileKey] = nextVersion;
-
-          const dataUrl = await fileToDataUrl(file.file);
-          const displayName = `${normalizePdfBaseName(file.name)}.pdf`;
-          return {
-            ...file,
-            dataUrl,
-            version: nextVersion,
-            name: displayName,
-            path: displayName,
-            originalName: file.name,
-            generatedName: buildGeneratedFileName(file.name, nextVersion, generationStamp),
-            downloadedAt: '',
-          };
-        }),
+      const referenceFiles = await Promise.all(
+        stagedFiles.map(async (file) => ({
+          name: file.name,
+          dataUrl: await fileToDataUrl(file.file),
+        })),
+      );
+      const reviewFiles = await Promise.all(
+        creoPdfFiles.map(async (file) => ({
+          name: file.name,
+          dataUrl: await fileToDataUrl(file.file),
+        })),
       );
 
-      setOutputFiles((current) => [...current, ...versionedFiles]);
-      setVersionMap(nextVersionMap);
-      setGenerated(true);
+      const response = await fetch('/api/analyze', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ referenceFiles, reviewFiles }),
+      });
+
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || !result.ok) {
+        throw new Error(result.error || 'Failed to generate the report.');
+      }
+
+      setReportUrl(result.reportUrl || `/report.html?ts=${Date.now()}`);
       setGeneratedAt(formatTimestamp(new Date()));
+      setReportStatus('Report generated successfully');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Analyzer execution failed.';
+      setReportError(message);
+      setReportStatus(message);
+      openAlert(message, 'Analysis error');
     } finally {
       setIsGenerating(false);
     }
   };
 
-  const outputStatus = generated
-    ? `Output generated${outputFiles.length ? ` (${outputFiles.length} file${outputFiles.length === 1 ? '' : 's'})` : ''}`
-    : stagedFiles.length || creoPdfFiles.length
-      ? 'PDF files selected, ready to generate'
-      : 'Waiting for PDF files';
+  const outputStatus = reportError
+    ? reportError
+    : reportUrl
+      ? reportStatus
+      : stagedFiles.length || creoPdfFiles.length
+        ? reportStatus
+        : 'Waiting for PDF files';
 
   return (
     <main className="app-shell">
@@ -339,8 +312,8 @@ function App() {
           <p className="eyebrow">CREO FILE WORKSPACE</p>
           <h1>Choose a native format and inspect the Creo folder output in one place.</h1>
           <p className="hero-copy">
-            Select a target native format and drop in a Creo folder. Preview every output file in a
-            crisp, real-time list.
+            Select a target native format and upload reference and Creo PDFs. Preview the generated
+            report in a crisp, real-time pane.
           </p>
         </div>
 
@@ -478,74 +451,49 @@ function App() {
           <div className="panel-header">
             <div>
               <p className="panel-kicker">Output</p>
-              <h2>Files</h2>
+              <h2>Report</h2>
             </div>
 
             <div className="output-actions">
               <div className="output-metrics">
                 <div>
-                  <span>Total files</span>
-                  <strong>{summary.count}</strong>
+                  <span>Reference PDFs</span>
+                  <strong>{summary.referenceCount}</strong>
+                </div>
+
+                <div>
+                  <span>Creo PDFs</span>
+                  <strong>{summary.creoCount}</strong>
                 </div>
 
                 <div>
                   <span>Total size</span>
                   <strong>{summary.size}</strong>
                 </div>
-
-
               </div>
 
               <button
                 type="button"
                 className="download-button"
-                disabled={!outputFiles.length}
-                onClick={downloadAllFiles}
+                disabled={!reportUrl}
+                onClick={openReport}
               >
-                Download all
+                Open report
               </button>
             </div>
           </div>
 
           {generatedAt ? <div className="generated-stamp">Generated at {generatedAt}</div> : null}
 
-          {outputFiles.length ? (
-            <div className="file-list">
-              {outputFiles.map((file) => (
-                <article key={file.id} className="file-row">
-                  <div className="file-main">
-                    <strong>{file.name}</strong>
-                    <span>{file.path}</span>
-                  </div>
-
-                  <div className="file-meta">
-                    <span>{file.type}</span>
-                    <span>{formatBytes(file.size)}</span>
-                    <span>{file.updated}</span>
-                    <span>{file.downloadedAt ? `Downloaded ${file.downloadedAt}` : 'Not downloaded yet'}</span>
-
-                    <div className="file-actions">
-                      <button type="button" className="row-download" onClick={() => downloadFile(file)}>
-                        Download
-                      </button>
-
-                      <button
-                        type="button"
-                        className="row-delete"
-                        onClick={() => deleteOutputFile(file.id)}
-                      >
-                        Delete
-                      </button>
-                    </div>
-                  </div>
-                </article>
-              ))}
+          {reportUrl ? (
+            <div className="report-shell">
+              <iframe className="report-frame" title="Creo analysis report" src={reportUrl} />
             </div>
           ) : (
             <div className="empty-state">
               <div className="empty-illustration">DIR</div>
-              <h3>No files loaded yet</h3>
-              <p>Choose PDF files and generate output to display the files here.</p>
+              <h3>No report generated yet</h3>
+              <p>Choose PDF files in both panels and click Generate output to display report.html here.</p>
             </div>
           )}
         </section>
@@ -561,7 +509,7 @@ function App() {
             aria-describedby="alert-copy"
             onClick={(event) => event.stopPropagation()}
           >
-            <h3 id="alert-title">PDF files only</h3>
+            <h3 id="alert-title">{alertTitle}</h3>
             <p id="alert-copy">{alertMessage}</p>
             <div className="modal-actions">
               <button type="button" className="primary-button" onClick={closeAlert}>

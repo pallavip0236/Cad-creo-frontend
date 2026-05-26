@@ -100,8 +100,10 @@ async function fileToDataUrl(file) {
 function App() {
   const [nativeFormat, setNativeFormat] = useState(nativeFormats[0].value);
   const [stagedFiles, setStagedFiles] = useState([]);
+  const [creoPdfFiles, setCreoPdfFiles] = useState([]);
   const [outputFiles, setOutputFiles] = useState(() => loadStorage('creo-output-files-v1', []));
   const [selectedPdfLabel, setSelectedPdfLabel] = useState('');
+  const [selectedCreoPdfLabel, setSelectedCreoPdfLabel] = useState('');
   const [generated, setGenerated] = useState(false);
   const [generatedAt, setGeneratedAt] = useState('');
   const [versionMap, setVersionMap] = useState(() => loadStorage('creo-version-map-v1', {}));
@@ -110,6 +112,7 @@ function App() {
   const [alertOpen, setAlertOpen] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const fileInputRef = useRef(null);
+  const creoPdfInputRef = useRef(null);
   const formatMenuRef = useRef(null);
 
   const selectedFormatLabel =
@@ -190,8 +193,50 @@ function App() {
     event.target.value = '';
   };
 
+  const handleCreoPdfFiles = (event) => {
+    const files = Array.from(event.target.files || []);
+
+    if (!files.length) {
+      event.target.value = '';
+      return;
+    }
+
+    const invalidFile = files.find((file) => !isPdfFile(file));
+    if (invalidFile) {
+      setSelectedCreoPdfLabel('');
+      setCreoPdfFiles([]);
+      setGenerated(false);
+      setGeneratedAt('');
+      openAlert('Only PDF files are allowed. Please select PDF files only.');
+      event.target.value = '';
+      return;
+    }
+
+    const fileLabel = files.length === 1 ? files[0].name : `${files.length} PDF files selected`;
+    const enriched = files.map((file) => ({
+      file,
+      id: `${file.name}-${file.size}-${file.lastModified}`,
+      name: file.name,
+      path: file.name,
+      size: file.size,
+      type: file.type || 'application/pdf',
+      updated: new Date(file.lastModified).toLocaleDateString(),
+      downloadedAt: '',
+    }));
+
+    setSelectedCreoPdfLabel(fileLabel);
+    setCreoPdfFiles(enriched);
+    setGenerated(false);
+    setGeneratedAt('');
+    event.target.value = '';
+  };
+
   const openFolderPicker = () => {
     fileInputRef.current?.click();
+  };
+
+  const openCreoPdfPicker = () => {
+    creoPdfInputRef.current?.click();
   };
 
   const markDownloadTimestamp = (fileId) => {
@@ -227,7 +272,8 @@ function App() {
   };
 
   const generateOutput = async () => {
-    if (!stagedFiles.length || isGenerating) return;
+    const combinedFiles = [...stagedFiles, ...creoPdfFiles];
+    if (!combinedFiles.length || isGenerating) return;
 
     setIsGenerating(true);
     try {
@@ -235,7 +281,7 @@ function App() {
       const nextVersionMap = { ...versionMap };
 
       const versionedFiles = await Promise.all(
-        stagedFiles.map(async (file) => {
+        combinedFiles.map(async (file) => {
           const fileKey = normalizePdfBaseName(file.name).toLowerCase();
 
           // Check version embedded in the uploaded filename (handles re-uploaded downloads)
@@ -282,7 +328,7 @@ function App() {
 
   const outputStatus = generated
     ? `Output generated${outputFiles.length ? ` (${outputFiles.length} file${outputFiles.length === 1 ? '' : 's'})` : ''}`
-    : stagedFiles.length
+    : stagedFiles.length || creoPdfFiles.length
       ? 'PDF files selected, ready to generate'
       : 'Waiting for PDF files';
 
@@ -376,10 +422,37 @@ function App() {
               onChange={handleCreoFolder}
             />
 
+            <label htmlFor="creo-pdf-files">Creo PDF files</label>
+            <button type="button" className="folder-picker folder-card" onClick={openCreoPdfPicker}>
+              {selectedCreoPdfLabel ? (
+                <div className="folder-copy folder-copy-selected">
+                  <span className="folder-icon folder-icon-selected">PDF</span>
+                  <strong>{selectedCreoPdfLabel}</strong>
+                  <span>{`${creoPdfFiles.length} file${creoPdfFiles.length === 1 ? '' : 's'} detected`}</span>
+                </div>
+              ) : (
+                <div className="folder-copy folder-copy-empty">
+                  <span className="folder-icon">^</span>
+                  <strong>Click to select Creo PDF files</strong>
+                  <span>No Creo PDF files selected yet</span>
+                </div>
+              )}
+            </button>
+
+            <input
+              id="creo-pdf-files"
+              ref={creoPdfInputRef}
+              className="sr-only"
+              type="file"
+              multiple
+              accept=".pdf,application/pdf"
+              onChange={handleCreoPdfFiles}
+            />
+
             <button
               type="button"
               className="generate-button"
-              disabled={!stagedFiles.length || isGenerating}
+              disabled={(!stagedFiles.length && !creoPdfFiles.length) || isGenerating}
               onClick={generateOutput}
             >
               {isGenerating ? 'Generating...' : (

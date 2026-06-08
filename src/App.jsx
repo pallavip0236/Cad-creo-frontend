@@ -68,7 +68,6 @@ function LoadingSpinner({ label }) {
       <svg width="44" height="44" viewBox="0 0 44 44" fill="none" style={{animation:'spin .9s linear infinite'}}>
         <circle cx="22" cy="22" r="18" stroke="#e2e8f0" strokeWidth="4"/>
         <path d="M40 22a18 18 0 0 0-18-18" stroke="#6366f1" strokeWidth="4" strokeLinecap="round"/>
-        
       </svg>
       <div style={{textAlign:'center'}}>
         <div style={{fontSize:13,fontWeight:600,color:'#0f172a'}}>{label}</div>
@@ -98,6 +97,7 @@ export default function App() {
   const [alertTitle, setAlertTitle] = useState('Folder selection');
   const [alertOpen, setAlertOpen] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
+  const [isApplyingFixes, setIsApplyingFixes] = useState(false);
   const [isGeneratingComparison, setIsGeneratingComparison] = useState(false);
   const referenceFolderInputRef = useRef(null);
   const initialCreoFolderInputRef = useRef(null);
@@ -178,6 +178,29 @@ export default function App() {
     } finally { setIsGenerating(false); }
   };
 
+  const handleApplyFixes = async () => {
+    if (!initialReport || isApplyingFixes) {
+      openAlert('Please generate the initial report before applying fixes.'); return;
+    }
+    setIsApplyingFixes(true); setReportStatus('Applying fixes…');
+    try {
+      // Mock API endpoint for applying fixes based on the generated initial report
+      const res = await fetch('/api/apply-fixes', { 
+        method: 'POST', 
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ initialReport }) 
+      });
+      const result = await res.json().catch(() => ({}));
+      if (!res.ok || !result.ok) throw new Error(result.error || result.message || 'Failed to apply fixes.');
+      
+      openAlert('Fixes successfully executed on Creo files!', 'Success');
+      setReportStatus('Fixes applied successfully');
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Failed to apply fixes.';
+      setReportError(msg); openAlert(msg, 'Fix Error');
+    } finally { setIsApplyingFixes(false); }
+  };
+
   const handleRunComparison = async () => {
     if (!referenceFiles.length || !correctedCreoFiles.length || !initialReport || isGeneratingComparison) {
       openAlert('Generate the initial report first, then select the corrected Creo folder.', 'Comparison setup'); return;
@@ -224,8 +247,6 @@ export default function App() {
 
   return (
     <>
-      
-
       <main className="app-shell">
         {/* ── HERO ── */}
         <header className="hero">
@@ -313,6 +334,13 @@ export default function App() {
                 disabled={!referenceFiles.length||!initialCreoFiles.length||isGenerating}
                 onClick={handleGenerateOutput}>
                 {isGenerating ? <><span className="btn-spinner"/><span>Analyzing drawings…</span></> : <>Generate initial output →</>}
+              </button>
+
+              <button type="button" className="generate-button secondary-action-btn" 
+                style={{marginTop: 12, backgroundColor: '#475569'}}
+                disabled={!initialReport || isApplyingFixes}
+                onClick={handleApplyFixes}>
+                {isApplyingFixes ? <><span className="btn-spinner"/><span>Applying fixes…</span></> : <>Apply fixes ✨</>}
               </button>
             </div>
 
@@ -500,7 +528,3 @@ export default function App() {
     </>
   );
 }
-
-
-
-

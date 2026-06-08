@@ -9,6 +9,7 @@ const execFile = promisify(execFileCallback);
 
 const PORT = Number(process.env.CREO_API_PORT || 8787);
 const AGENT_ROOT = path.resolve('D:/creo-ai-agent');
+const latestReports = new Map();
 
 const MIME_TYPES = {
   '.json': 'application/json; charset=utf-8',
@@ -142,6 +143,66 @@ print(json.dumps(result, ensure_ascii=False))
   throw lastError || new Error('Failed to launch the comparison engine.');
 }
 
+async function runPythonReportHtml(pages) {
+  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'creo-report-'));
+  const pagesPath = path.join(tempRoot, 'pages.json');
+  const script = `
+import io
+import json
+import sys
+from app.services.pdf_analyzer.report import generate_report
+
+sys.stdout.reconfigure(encoding='utf-8')
+
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    pages = json.load(handle)
+
+print(generate_report(pages))
+`.trim();
+
+  try {
+    await fs.writeFile(pagesPath, JSON.stringify(pages), 'utf8');
+    const candidates = process.platform === 'win32'
+      ? [
+          { command: 'py', args: ['-3', '-X', 'utf8', '-c', script, pagesPath] },
+          { command: 'python', args: ['-X', 'utf8', '-c', script, pagesPath] },
+        ]
+      : [
+          { command: 'python3', args: ['-X', 'utf8', '-c', script, pagesPath] },
+          { command: 'python', args: ['-X', 'utf8', '-c', script, pagesPath] },
+        ];
+
+    let lastError = null;
+    for (const candidate of candidates) {
+      try {
+        const { stdout } = await execFile(candidate.command, candidate.args, {
+          cwd: AGENT_ROOT,
+          env: { ...process.env, PYTHONUTF8: '1' },
+          maxBuffer: 20 * 1024 * 1024,
+        });
+        return stdout;
+      } catch (error) {
+        lastError = error;
+        if (error?.code !== 'ENOENT') {
+          break;
+        }
+      }
+    }
+
+    throw lastError || new Error('Failed to render report HTML.');
+  } finally {
+    await fs.rm(tempRoot, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+function stripComparisonImages(pages = []) {
+  return pages.map((page) => {
+    const copy = { ...page };
+    delete copy.comparison_image;
+    return copy;
+  });
+}
+
 async function compareFolderBatch(referenceFiles = [], creoFiles = [], reportType = 'initial') {
   const referenceMap = buildFolderMap(referenceFiles);
   const creoMap = buildFolderMap(creoFiles);
@@ -178,12 +239,7 @@ async function compareFolderBatch(referenceFiles = [], creoFiles = [], reportTyp
       }
 
       const documentPages = Array.isArray(result.pages) ? result.pages : [];
-      pages = pages.concat(
-        documentPages.map((page) => ({
-          ...page,
-          document: key,
-        })),
-      );
+      pages = pages.concat(documentPages.map((page) => ({ ...page, document: key })));
 
       totalIssues += Number(result.summary?.total_issues || 0);
       scoreTotal += Number(result.summary?.overall_score || 0) * Math.max(documentPages.length, 1);
@@ -195,27 +251,36 @@ async function compareFolderBatch(referenceFiles = [], creoFiles = [], reportTyp
     }
 
     const overallScore = scoreWeight ? Math.round(scoreTotal / scoreWeight) : 0;
+    const fullReport = {
+      generatedAt: new Date().toISOString(),
+      mode: reportType,
+      folders: {
+        reference: referenceFiles.length,
+        creo: creoFiles.length,
+        matched: matchedKeys.length,
+        missingCreoFiles,
+        missingReferenceFiles,
+      },
+      summary: {
+        total_issues: totalIssues,
+        by_type: byType,
+        page_count: pages.length,
+        overall_score: overallScore,
+      },
+      pages,
+    };
+    const reportHtml = await runPythonReportHtml(pages);
+    latestReports.set(reportType, {
+      html: reportHtml,
+      report: fullReport,
+    });
 
     return {
       ok: true,
       reportType,
       report: {
-        generatedAt: new Date().toISOString(),
-        mode: reportType,
-        folders: {
-          reference: referenceFiles.length,
-          creo: creoFiles.length,
-          matched: matchedKeys.length,
-          missingCreoFiles,
-          missingReferenceFiles,
-        },
-        summary: {
-          total_issues: totalIssues,
-          by_type: byType,
-          page_count: pages.length,
-          overall_score: overallScore,
-        },
-        pages,
+        ...fullReport,
+        pages: stripComparisonImages(pages),
       },
       warnings: {
         missingCreoFiles,
@@ -236,6 +301,15 @@ function sendJson(res, statusCode, payload) {
     'Access-Control-Allow-Headers': 'Content-Type',
   });
   res.end(body);
+}
+
+function sendHtml(res, statusCode, html) {
+  res.writeHead(statusCode, {
+    'Content-Type': 'text/html; charset=utf-8',
+    'Cache-Control': 'no-store',
+    'Access-Control-Allow-Origin': '*',
+  });
+  res.end(html);
 }
 
 async function handleAnalyze(req, res) {
@@ -286,6 +360,37 @@ async function handleComparison(req, res) {
   }
 }
 
+async function handleReport(req, res, url) {
+  const reportType = String(url.searchParams.get('type') || 'comparison');
+  const download = String(url.searchParams.get('download') || '') === '1';
+  const latest = latestReports.get(reportType);
+
+  if (!latest?.html) {
+    sendHtml(
+      res,
+      404,
+      `<h2 style="font-family:sans-serif;padding:40px">No ${reportType} report has been generated yet.</h2>`,
+    );
+    return;
+  }
+
+  if (!download) {
+    sendHtml(res, 200, latest.html);
+    return;
+  }
+
+  const autoDownloadScript = `
+<script>
+  window.addEventListener('load', () => {
+    setTimeout(() => {
+      const btn = document.getElementById('downloadPdfBtn');
+      if (btn) btn.click();
+    }, 250);
+  });
+</script>`;
+  sendHtml(res, 200, latest.html.replace('</body>', `${autoDownloadScript}</body>`));
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
 
@@ -312,6 +417,11 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === 'GET' && url.pathname === '/api/health') {
     sendJson(res, 200, { ok: true, agentRoot: AGENT_ROOT });
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/report') {
+    await handleReport(req, res, url);
     return;
   }
 
